@@ -2,11 +2,11 @@ import os
 import telebot
 import uuid
 import requests
-from flask import Flask, request
+from flask import Flask, request, redirect, Response
 from pymongo import MongoClient
 from telebot import types
 
-# --- কনফিগারেশন ---
+# --- কনফিগারেশন (আপনার দেওয়া তথ্য অনুযায়ী) ---
 API_TOKEN = '8501387772:AAH8dn31CMywDrF0nSjM7TMfB2uA8i-Nfzg'
 MONGO_URI = 'mongodb+srv://drama:drama@cluster0.sa4kvgu.mongodb.net/DramaStoreDB?retryWrites=true&w=majority&appName=Cluster0'
 ADMIN_ID = 8932594210
@@ -32,32 +32,11 @@ def get_settings():
             "id": "bot_settings", 
             "log_channel": None, 
             "send_channel": None, 
-            "force_channels": [] 
+            "force_channels": []
         }
         settings_col.insert_one(default)
         return default
     return settings
-
-# --- বাটন জেনারেটর ফাংশন (ইউজারদের জন্য) ---
-def get_channel_buttons(extra_button=None):
-    settings = get_settings()
-    channels = settings.get('force_channels', [])
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    
-    buttons = []
-    for i, channel_id in enumerate(channels, 1):
-        try:
-            chat = bot.get_chat(channel_id)
-            link = f"https://t.me/{chat.username}" if chat.username else bot.export_chat_invite_link(channel_id)
-            buttons.append(types.InlineKeyboardButton(f"Channel {i} 📢", url=link))
-        except:
-            continue
-    
-    markup.add(*buttons)
-    if extra_button:
-        markup.add(extra_button)
-        
-    return markup
 
 # --- লিঙ্ক শর্টনার ফাংশন ---
 def get_short_link(long_url):
@@ -71,177 +50,163 @@ def get_short_link(long_url):
     except:
         return long_url
 
-# --- ফ্লাস্ক রুটস ---
+# --- বাটন জেনারেটর ---
+def get_channel_buttons(extra_buttons=None):
+    settings = get_settings()
+    channels = settings.get('force_channels', [])
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    btns = []
+    for i, cid in enumerate(channels, 1):
+        try:
+            chat = bot.get_chat(cid)
+            link = f"https://t.me/{chat.username}" if chat.username else bot.export_chat_invite_link(cid)
+            btns.append(types.InlineKeyboardButton(f"Join Channel {i} 📢", url=link))
+        except: continue
+    
+    markup.add(*btns)
+    if extra_buttons:
+        for b in extra_buttons: markup.add(b)
+    return markup
+
+# --- ফ্লাস্ক রুটস (Webhook & Download Server) ---
+
 @app.route('/' + API_TOKEN, methods=['POST'])
 def getMessage():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
+    bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
     return "!", 200
 
 @app.route("/")
 def index():
     bot.remove_webhook()
     bot.set_webhook(url=f"{WEB_URL}/{API_TOKEN}")
-    return "<h1>Bot is Active!</h1>", 200
+    return "<h1>File Store & Download Server is Active!</h1>", 200
 
-# --- কমান্ড হ্যান্ডলারস ---
+# সরাসরি ব্রাউজার ডাউনলোড রুট
+@app.route("/dl/<key>")
+def download_file(key):
+    data = links_col.find_one({"key": key})
+    if not data:
+        return "<h1>File Not Found!</h1>", 404
+    
+    try:
+        file_id = data.get('file_id')
+        file_info = bot.get_file(file_id)
+        # টেলিগ্রাম থেকে সরাসরি ডাউনলোড লিঙ্ক তৈরি
+        direct_url = f"https://api.telegram.org/file/bot{API_TOKEN}/{file_info.file_path}"
+        # ইউজারকে টেলিগ্রামের ডিরেক্ট লিঙ্কে পাঠিয়ে দেওয়া (টেলিগ্রাম সার্ভার ব্রাউজার ডাউনলোড সাপোর্ট করে)
+        return redirect(direct_url)
+    except Exception as e:
+        return f"Error: {str(e)}", 500
+
+# --- বটের কমান্ড হ্যান্ডলারস ---
 
 @bot.message_handler(commands=['start'])
 def start(message):
     args = message.text.split()
-    
     if len(args) > 1:
         key = args[1]
         data = links_col.find_one({"key": key})
         settings = get_settings()
-        
         if data and settings.get('send_channel'):
             try:
-                sent_msg = bot.copy_message(
-                    chat_id=settings['send_channel'],
-                    from_chat_id=data['log_channel'],
-                    message_id=data['msg_id']
-                )
+                sent = bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'])
+                c_info = bot.get_chat(settings['send_channel'])
+                msg_link = f"https://t.me/{c_info.username}/{sent.message_id}" if c_info.username else f"https://t.me/c/{str(settings['send_channel']).replace('-100','')}/{sent.message_id}"
                 
-                channel_info = bot.get_chat(settings['send_channel'])
-                msg_id = sent_msg.message_id
-                msg_link = f"https://t.me/{channel_info.username}/{msg_id}" if channel_info.username else f"https://t.me/c/{str(settings['send_channel']).replace('-100', '')}/{msg_id}"
-
-                btn = types.InlineKeyboardButton("🚀 ফাইলটি দেখুন (Watch Now)", url=msg_link)
-                markup = get_channel_buttons(extra_button=btn)
-                
-                bot.send_message(message.chat.id, "✅ **আপনার ফাইলটি রেডি! নিচের বাটনে ক্লিক করুন।**", reply_markup=markup, parse_mode="Markdown")
-            except Exception as e:
-                bot.reply_to(message, f"❌ ত্রুটি: {str(e)}")
+                btn = types.InlineKeyboardButton("🚀 ক্লিক করে ফাইলটি দেখুন", url=msg_link)
+                bot.send_message(message.chat.id, "✅ আপনার ফাইলটি রেডি!", reply_markup=get_channel_buttons([btn]))
+            except: pass
         return
+    bot.send_message(message.chat.id, "👋 স্বাগতম! ফাইল পেতে চ্যানেলগুলোতে জয়েন করুন।", reply_markup=get_channel_buttons())
 
-    markup = get_channel_buttons()
-    bot.send_message(message.chat.id, "👋 **স্বাগতম! আমাদের চ্যানেল লিস্ট:**", reply_markup=markup, parse_mode="Markdown")
-
-# --- এডমিন কমান্ডস: চ্যানেল ম্যানেজমেন্ট ---
+# --- এডমিন কমান্ডস (চ্যানেল ম্যানেজমেন্ট) ---
 
 @bot.message_handler(commands=['set_force'])
-def set_force_channels(message):
+def set_force(message):
     if message.from_user.id != ADMIN_ID: return
     try:
-        input_text = message.text.replace('/set_force', '').strip()
-        if not input_text:
-            bot.reply_to(message, "ব্যবহার: `/set_force -100123, -100456`")
-            return
-        
-        new_channels = [int(i.strip()) for i in input_text.split(',')]
-        settings = get_settings()
-        current_channels = settings.get('force_channels', [])
-        
-        # ডুপ্লিকেট বাদ দিয়ে আপডেট করা
-        updated_list = list(set(current_channels + new_channels))
-        
-        settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": updated_list}}, upsert=True)
-        bot.reply_to(message, f"✅ নতুন {len(new_channels)}টি চ্যানেল যোগ করা হয়েছে।\nএখন মোট চ্যানেল: {len(updated_list)}টি।")
-    except:
-        bot.reply_to(message, "ভুল আইডি দিয়েছেন।")
+        ids = [int(i.strip()) for i in message.text.replace('/set_force','').split(',')]
+        curr = get_settings().get('force_channels', [])
+        new_list = list(set(curr + ids))
+        settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": new_list}}, upsert=True)
+        bot.reply_to(message, "✅ চ্যানেলগুলো আপডেট হয়েছে।")
+    except: bot.reply_to(message, "আইডিগুলো কমা দিয়ে দিন।")
 
 @bot.message_handler(commands=['manage_channels'])
 def manage_channels(message):
     if message.from_user.id != ADMIN_ID: return
-    
-    settings = get_settings()
-    channels = settings.get('force_channels', [])
-    
-    if not channels:
-        bot.reply_to(message, "কোনো চ্যানেল সেট করা নেই।")
-        return
-
+    channels = get_settings().get('force_channels', [])
+    if not channels: return bot.reply_to(message, "কোনো চ্যানেল নেই।")
     markup = types.InlineKeyboardMarkup()
     for cid in channels:
-        try:
-            chat = bot.get_chat(cid)
-            title = chat.title if chat.title else cid
-        except:
-            title = f"Unknown ({cid})"
-            
-        markup.add(
-            types.InlineKeyboardButton(f"Channel: {title}", url="https://t.me/example"), # জাস্ট নাম দেখানোর জন্য
-            types.InlineKeyboardButton(f"❌ Delete", callback_query_data=f"del_{cid}")
-        )
-    
-    bot.send_message(message.chat.id, "⚙️ **চ্যানেল ম্যানেজমেন্ট:**\nনিচের লিস্ট থেকে চ্যানেল ডিলিট করতে পারবেন।", reply_markup=markup, parse_mode="Markdown")
+        markup.add(types.InlineKeyboardButton(f"ID: {cid}", callback_data="n"), 
+                   types.InlineKeyboardButton("❌ Delete", callback_data=f"del_{cid}"))
+    bot.send_message(message.chat.id, "⚙️ চ্যানেল ম্যানেজমেন্ট:", reply_markup=markup)
 
-# --- বাটন ক্লিক হ্যান্ডলার (ডিলিট করার জন্য) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith('del_'))
-def handle_delete_channel(call):
-    if call.from_user.id != ADMIN_ID: return
-    
-    channel_id = int(call.data.replace('del_', ''))
-    settings = get_settings()
-    channels = settings.get('force_channels', [])
-    
-    if channel_id in channels:
-        channels.remove(channel_id)
+def del_channel(call):
+    cid = int(call.data.split('_')[1])
+    channels = get_settings().get('force_channels', [])
+    if cid in channels:
+        channels.remove(cid)
         settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": channels}})
-        
-        # মেসেজ আপডেট করা
-        bot.answer_callback_query(call.id, "✅ চ্যানেলটি ডিলিট করা হয়েছে।")
-        
-        # নতুন লিস্ট দেখানো
-        if not channels:
-            bot.edit_message_text("কোনো চ্যানেল নেই।", call.message.chat.id, call.message.message_id)
-        else:
-            new_markup = types.InlineKeyboardMarkup()
-            for cid in channels:
-                try:
-                    chat = bot.get_chat(cid)
-                    title = chat.title
-                except:
-                    title = cid
-                new_markup.add(
-                    types.InlineKeyboardButton(f"Channel: {title}", url="https://t.me/example"),
-                    types.InlineKeyboardButton(f"❌ Delete", callback_query_data=f"del_{cid}")
-                )
-            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=new_markup)
-    else:
-        bot.answer_callback_query(call.id, "চ্যানেলটি পাওয়া যায়নি।", show_alert=True)
+        bot.answer_callback_query(call.id, "ডিলিট হয়েছে")
+        bot.delete_message(call.message.chat.id, call.message.message_id)
 
-# --- অন্যান্য সেটিংস কমান্ডস ---
-@bot.message_handler(commands=['log_cnl'])
-def set_log_channel(message):
+@bot.message_handler(commands=['log_cnl', 'send_cnl'])
+def set_channels(message):
     if message.from_user.id != ADMIN_ID: return
+    key = "log_channel" if "log" in message.text else "send_channel"
     try:
         cid = int(message.text.split()[1])
-        settings_col.update_one({"id": "bot_settings"}, {"$set": {"log_channel": cid}}, upsert=True)
-        bot.reply_to(message, f"✅ লগ চ্যানেল সেট হয়েছে: `{cid}`")
-    except: bot.reply_to(message, "ব্যবহার: `/log_cnl -100xxxxxx`")
+        settings_col.update_one({"id": "bot_settings"}, {"$set": {key: cid}}, upsert=True)
+        bot.reply_to(message, f"✅ {key} সেট হয়েছে।")
+    except: pass
 
-@bot.message_handler(commands=['send_cnl'])
-def set_send_channel(message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        cid = int(message.text.split()[1])
-        settings_col.update_one({"id": "bot_settings"}, {"$set": {"send_channel": cid}}, upsert=True)
-        bot.reply_to(message, f"✅ সেন্ড চ্যানেল সেট হয়েছে: `{cid}`")
-    except: bot.reply_to(message, "ব্যবহার: `/send_cnl -100xxxxxx`")
+# --- ফাইল স্টোরিং ও লিঙ্ক জেনারেশন ---
 
-# --- ফাইল হ্যান্ডলিং ---
-@bot.message_handler(content_types=['document', 'video', 'audio', 'photo'])
+@bot.message_handler(content_types=['document', 'video', 'audio'])
 def handle_admin_files(message):
     if message.from_user.id != ADMIN_ID: return
     settings = get_settings()
-    if not settings.get('log_channel'):
-        bot.reply_to(message, "আগে `/log_cnl` সেট করুন।")
-        return
+    if not settings.get('log_channel'): return bot.reply_to(message, "আগে `/log_cnl` দিন।")
 
-    sent_msg = bot.copy_message(settings['log_channel'], message.chat.id, message.message_id)
+    # ফাইল টাইপ অনুযায়ী আইডি নেওয়া
+    file_id = ""
+    if message.document: file_id = message.document.file_id
+    elif message.video: file_id = message.video.file_id
+    elif message.audio: file_id = message.audio.file_id
+
+    # লিঙ্ক জেনারেট করা
     key = str(uuid.uuid4())[:8]
-    raw_link = f"https://t.me/{bot.get_me().username}?start={key}"
-    short_link = get_short_link(raw_link)
+    bot_link = f"https://t.me/{bot.get_me().username}?start={key}"
+    web_download_url = f"{WEB_URL}/dl/{key}" # আপনার ভার্সেল সার্ভার লিঙ্ক
+    
+    short_bot_link = get_short_link(bot_link)
+    short_web_link = get_short_link(web_download_url)
 
-    links_col.insert_one({"key": key, "msg_id": sent_msg.message_id, "log_channel": settings['log_channel']})
+    # বাটন তৈরি
+    btn_bot = types.InlineKeyboardButton("🤖 Telegram Link", url=short_bot_link)
+    btn_web = types.InlineKeyboardButton("🌐 Browser Download", url=short_web_link)
+    markup = get_channel_buttons([btn_bot, btn_web])
 
-    response_text = f"✅ **ফাইল সেভ হয়েছে!**\n\n🔗 **বট লিঙ্ক:** `{raw_link}`\n🌐 **শর্ট লিঙ্ক:** `{short_link}`"
-    btn = types.InlineKeyboardButton("📥 Download Link", url=short_link)
-    markup = get_channel_buttons(extra_button=btn)
-    bot.reply_to(message, response_text, reply_markup=markup, parse_mode="Markdown")
+    # লগ চ্যানেলে ফাইল কপি করা (বাটন সহ)
+    sent = bot.copy_message(settings['log_channel'], message.chat.id, message.message_id, reply_markup=markup)
+    
+    # ডাটাবেসে ফাইল আইডি সহ সেভ (ডাউনলোডের জন্য জরুরি)
+    links_col.insert_one({
+        "key": key, 
+        "msg_id": sent.message_id, 
+        "log_channel": settings['log_channel'],
+        "file_id": file_id
+    })
+
+    res_text = (f"✅ **ফাইল সাকসেসফুলি সেভ হয়েছে!**\n\n"
+                f"🤖 **বট লিঙ্ক:**\n`{short_bot_link}`\n\n"
+                f"🌐 **ওয়েব ডাউনলোড লিঙ্ক:**\n`{short_web_link}`")
+    
+    bot.reply_to(message, res_text, reply_markup=markup, parse_mode="Markdown")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

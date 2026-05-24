@@ -24,7 +24,7 @@ API_HASH = '8b4fd9ef578af114502feeafa2d31938'
 BOT_TOKEN = '8501387772:AAH8dn31CMywDrF0nSjM7TMfB2uA8i-Nfzg'
 MONGO_URI = 'mongodb+srv://drama:drama@cluster0.sa4kvgu.mongodb.net/DramaStoreDB?retryWrites=true&w=majority&appName=Cluster0'
 ADMIN_ID = 8932594210
-WEB_URL = "https://filestore-jet.vercel.app" # আপনার রেন্ডার লিঙ্ক এখানে দিন
+WEB_URL = "https://filestore-eclu.onrender.com" # আপনার রেন্ডার লিঙ্ক এখানে দিন
 
 # শর্ট লিঙ্ক সেটিংস
 SHORTENER_URL = "https://urlbotsot.vercel.app/api"

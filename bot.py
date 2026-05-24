@@ -227,5 +227,9 @@ def index():
     return "<h1>Server is Running...</h1>", 200
 
 if __name__ == "__main__":
-    tg_client.start() # Pyrogram স্টার্ট
-    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
+    # Pyrogram স্টার্ট
+    tg_client.start() 
+    
+    # Render এর জন্য পোর্টের সঠিক কনফিগারেশন
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

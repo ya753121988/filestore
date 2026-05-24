@@ -1,6 +1,7 @@
-requests
-pymongo
-telebot
-flask
-tgcrypto
+pyTelegramBotAPI
 pyrogram
+tgcrypto
+flask
+pymongo
+requests
+dnspython

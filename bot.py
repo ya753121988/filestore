@@ -4,6 +4,7 @@ import uuid
 import requests
 import time
 import re
+import random
 from flask import Flask, request
 from pymongo import MongoClient
 from telebot import types
@@ -26,6 +27,7 @@ db = client['DramaStoreDB']
 links_col = db['links']
 settings_col = db['settings']
 users_col = db['users']
+chats_col = db['chats'] # চ্যানেল ও গ্রুপ ট্র্যাক করার জন্য নতুন কালেকশন
 
 # ব্যাচ প্রসেস ট্র্যাক করার জন্য
 user_states = {}
@@ -40,11 +42,59 @@ def get_settings():
             "send_channel": None, 
             "force_channels": [],
             "logo_url": "https://telegra.ph/file/default-logo.jpg",
-            "fsub_active": True  # ডিফল্টভাবে ফোর্স সাবস্ক্রাইব চালু
+            "fsub_active": True,
+            "auto_react": True # অটো রিয়েকশন ডিফল্ট অন
         }
         settings_col.insert_one(default)
         return default
     return settings
+
+# --- ইউজার ডাটা সেভ করার ফাংশন ---
+def save_user(user):
+    full_name = f"{user.first_name} {user.last_name if user.last_name else ''}".strip()
+    users_col.update_one(
+        {"user_id": user.id},
+        {"$set": {
+            "user_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "full_name": full_name
+        }},
+        upsert=True
+    )
+
+# --- অটো মেম্বার একসেপ্ট (Auto Join Request Accept) ---
+@bot.chat_join_request_handler()
+def auto_approve(chat_join_request):
+    try:
+        bot.approve_chat_join_request(chat_join_request.chat.id, chat_join_request.from_user.id)
+    except Exception as e:
+        print(f"Auto Accept Error: {e}")
+
+# --- অটো রিয়েকশন ফাংশন ---
+def apply_auto_reaction(chat_id, message_id):
+    settings = get_settings()
+    if settings.get('auto_react', True):
+        reactions = ["👍", "❤️", "🔥", "🥰", "👏", "⚡", "🎉", "🤩"]
+        try:
+            bot.set_message_reaction(chat_id, message_id, [types.ReactionTypeEmoji(random.choice(reactions))])
+        except:
+            pass
+
+# চ্যানেল পোস্ট ডিটেক্ট এবং রিয়েক্ট
+@bot.channel_post_handler(func=lambda message: True)
+def handle_channel_post(message):
+    apply_auto_reaction(message.chat.id, message.message_id)
+    # ব্রডকাস্টের জন্য চ্যানেল আইডি সেভ রাখা
+    chats_col.update_one({"chat_id": message.chat.id}, {"$set": {"type": "channel", "title": message.chat.title}}, upsert=True)
+
+# গ্রুপ পোস্ট ডিটেক্ট এবং রিয়েক্ট
+@bot.message_handler(func=lambda m: m.chat.type in ['group', 'supergroup'])
+def handle_group_msg(message):
+    apply_auto_reaction(message.chat.id, message.message_id)
+    # ব্রডকাস্টের জন্য গ্রুপ আইডি সেভ রাখা
+    chats_col.update_one({"chat_id": message.chat.id}, {"$set": {"type": "group", "title": message.chat.title}}, upsert=True)
 
 # --- লিঙ্ক থেকে আইডি বের করার ফাংশন ---
 def get_message_id(text):
@@ -55,24 +105,18 @@ def get_message_id(text):
 def is_subscribed(user_id):
     if user_id == ADMIN_ID:
         return True
-    
     settings = get_settings()
-    
-    # এডমিন যদি ফোর্স সাবস্ক্রাইব বন্ধ করে রাখে তবে চেক করবে না
     if not settings.get('fsub_active', True):
         return True
-
     channels = settings.get('force_channels', [])
     if not channels:
         return True
-    
     for cid in channels:
         try:
             status = bot.get_chat_member(cid, user_id).status
             if status in ['left', 'kicked']:
                 return False
         except Exception:
-            # যদি বট চ্যানেলে এডমিন না থাকে তবে চেক স্কিপ করবে
             continue 
     return True
 
@@ -81,7 +125,6 @@ def get_channel_buttons(extra_buttons=None):
     settings = get_settings()
     channels = settings.get('force_channels', [])
     markup = types.InlineKeyboardMarkup(row_width=1)
-    
     for i, cid in enumerate(channels, 1):
         try:
             chat = bot.get_chat(cid)
@@ -89,14 +132,11 @@ def get_channel_buttons(extra_buttons=None):
             markup.add(types.InlineKeyboardButton(f"Join Channel {i} 📢", url=link))
         except:
             continue
-    
     if extra_buttons:
         for b in extra_buttons:
             markup.add(b)
-            
     admin_btn = types.InlineKeyboardButton("👨‍💻 Admin Contact", url="https://t.me/AllDramaKingsAdminBot")
     markup.add(admin_btn)
-    
     return markup
 
 # --- লিঙ্ক শর্টনার ফাংশন ---
@@ -114,33 +154,19 @@ def get_short_link(long_url):
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    save_user(message.from_user) # ইউজারের সব তথ্য সেভ করা হচ্ছে
     user_id = message.from_user.id
-    
-    # ইউজার ডাটাবেসে সেভ করা
-    if not users_col.find_one({"user_id": user_id}):
-        users_col.insert_one({"user_id": user_id})
-
     settings = get_settings()
     args = message.text.split()
     
-    # যদি স্টার্ট লিঙ্কে ফাইল কি (Key) থাকে
     if len(args) > 1:
         key = args[1]
-        
-        # ফোর্স সাবস্ক্রাইব চেক
         if not is_subscribed(user_id):
             btn = types.InlineKeyboardButton("Try Again 🔄", url=f"https://t.me/{bot.get_me().username}?start={key}")
-            return bot.send_message(
-                message.chat.id, 
-                "❌ **ফাইলটি পেতে আপনাকে আমাদের নিচের চ্যানেলে জয়েন করতে হবে।**", 
-                reply_markup=get_channel_buttons([btn]),
-                parse_mode="Markdown"
-            )
+            return bot.send_message(message.chat.id, "❌ **ফাইলটি পেতে আপনাকে আমাদের নিচের চ্যানেলে জয়েন করতে হবে।**", reply_markup=get_channel_buttons([btn]), parse_mode="Markdown")
 
-        # ডাটাবেস থেকে ফাইল খোঁজা
         data = links_col.find_one({"key": key})
         if data:
-            # চেক করা হচ্ছে এটি সিঙ্গেল ফাইল নাকি ব্যাচ
             if "start_id" in data and "end_id" in data:
                 msg_ids = list(range(data['start_id'], data['end_id'] + 1))
             else:
@@ -154,7 +180,7 @@ def start(message):
                         last_sent_id = sent_to_channel.message_id
                     else:
                         bot.copy_message(message.chat.id, data['log_channel'], m_id)
-                    time.sleep(0.5) # রেট লিমিট এড়াতে
+                    time.sleep(0.5)
                 except:
                     continue
 
@@ -187,11 +213,14 @@ def start(message):
             bot.send_message(message.chat.id, "❌ দুঃখিত, ফাইলটি খুঁজে পাওয়া যায়নি।")
         return
 
-    # সাধারণ স্টার্ট মেসেজ
     user = message.from_user
+    full_name = f"{user.first_name} {user.last_name if user.last_name else ''}".strip()
     start_text = (
-        f"👋 হ্যালো, **{user.first_name}**\n\n"
+        f"👋 হ্যালো, **{full_name}**\n\n"
         f"🆔 ইউজার আইডি: `{user.id}`\n"
+        f"👤 নাম: `{user.first_name}`\n"
+        f"📛 ফুল নাম: `{full_name}`\n"
+        f"🔗 ইউজারনেম: @{user.username if user.username else 'None'}\n\n"
         "আমাদের বট থেকে ফাইল পেতে চ্যানেলে জয়েন থাকা বাধ্যতামূলক।"
     )
     
@@ -225,46 +254,75 @@ def process_step_2(message):
         admin_data = user_states[message.from_user.id]
         start_id = admin_data['start_id']
         end_id = m_id
-        
         settings = get_settings()
         if not settings.get('log_channel'):
             return bot.reply_to(message, "❌ আগে `/log_cnl` সেট করুন।")
-
         key = str(uuid.uuid4())[:8]
         raw_link = f"https://t.me/{bot.get_me().username}?start={key}"
         short_link = get_short_link(raw_link)
-
-        # ডাটাবেসে ব্যাচ সেভ
-        links_col.insert_one({
-            "key": key,
-            "start_id": start_id,
-            "end_id": end_id,
-            "log_channel": settings['log_channel']
-        })
-
+        links_col.insert_one({"key": key, "start_id": start_id, "end_id": end_id, "log_channel": settings['log_channel']})
         del user_states[message.from_user.id]
-        
-        bot.send_message(message.chat.id, 
-            f"✅ **ব্যাচ লিঙ্ক তৈরি হয়েছে!**\n\n"
-            f"📦 রেঞ্জ: `{start_id}` থেকে `{end_id}`\n"
-            f"🔗 সর্ট লিঙ্ক: `{short_link}`\n"
-            f"🔗 ডিরেক্ট লিঙ্ক: `{raw_link}`", 
-            parse_mode="Markdown"
-        )
+        bot.send_message(message.chat.id, f"✅ **ব্যাচ লিঙ্ক তৈরি হয়েছে!**\n\n📦 রেঞ্জ: `{start_id}` থেকে `{end_id}`\n🔗 সর্ট লিঙ্ক: `{short_link}`\n🔗 ডিরেক্ট লিঙ্ক: `{raw_link}`", parse_mode="Markdown")
     else:
         bot.send_message(message.chat.id, "❌ ভুল লিঙ্ক। শেষ মেসেজ লিঙ্কটি দিন।")
+
+@bot.message_handler(commands=['del_all'])
+def delete_all_files(message):
+    if message.from_user.id != ADMIN_ID: return
+    links_col.delete_many({})
+    bot.reply_to(message, "🗑️ **ডাটাবেস থেকে সকল ফাইল লিঙ্ক ডিলিট করা হয়েছে!**")
 
 @bot.message_handler(commands=['fsub_on'])
 def fsub_on(message):
     if message.from_user.id != ADMIN_ID: return
     settings_col.update_one({"id": "bot_settings"}, {"$set": {"fsub_active": True}}, upsert=True)
-    bot.reply_to(message, "✅ **ফোর্স সাবস্ক্রাইব (Must Join) অন করা হয়েছে।**")
+    bot.reply_to(message, "✅ **ফোর্স সাবস্ক্রাইব অন করা হয়েছে।**")
 
 @bot.message_handler(commands=['fsub_off'])
 def fsub_off(message):
     if message.from_user.id != ADMIN_ID: return
     settings_col.update_one({"id": "bot_settings"}, {"$set": {"fsub_active": False}}, upsert=True)
-    bot.reply_to(message, "⚠️ **ফোর্স সাবস্ক্রাইব (Must Join) অফ করা হয়েছে।**")
+    bot.reply_to(message, "⚠️ **ফোর্স সাবস্ক্রাইব অফ করা হয়েছে।**")
+
+@bot.message_handler(commands=['status'])
+def status(message):
+    if message.from_user.id != ADMIN_ID: return
+    u_count = users_col.count_documents({})
+    f_count = links_col.count_documents({})
+    c_count = chats_col.count_documents({})
+    settings = get_settings()
+    fsub_status = "✅ चालू" if settings.get('fsub_active', True) else "❌ বন্ধ"
+    bot.reply_to(message, f"📊 **বট স্ট্যাটাস**\n\n👥 মোট ইউজার: {u_count}\n📁 মোট ফাইল লিঙ্ক: {f_count}\n📢 কানেক্টেড চ্যানেল/গ্রুপ: {c_count}\n📢 ফোর্স সাবস্ক্রাইব: {fsub_status}", parse_mode="Markdown")
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    if message.from_user.id != ADMIN_ID: return
+    if not message.reply_to_message:
+        return bot.reply_to(message, "মেসেজটি রিপ্লাই দিন এবং লিখুন `/broadcast`")
+    users = users_col.find({})
+    success = 0
+    for u in users:
+        try:
+            bot.copy_message(u['user_id'], message.chat.id, message.reply_to_message.message_id)
+            success += 1
+            time.sleep(0.05)
+        except: continue
+    bot.send_message(message.chat.id, f"✅ ইউজার ব্রডকাস্ট শেষ! {success} জনকে পাঠানো হয়েছে।")
+
+@bot.message_handler(commands=['c_broadcast'])
+def channel_broadcast(message):
+    if message.from_user.id != ADMIN_ID: return
+    if not message.reply_to_message:
+        return bot.reply_to(message, "মেসেজটি রিপ্লাই দিন এবং লিখুন `/c_broadcast` (সব চ্যানেল ও গ্রুপে যাবে)")
+    chats = chats_col.find({})
+    success = 0
+    for c in chats:
+        try:
+            bot.copy_message(c['chat_id'], message.chat.id, message.reply_to_message.message_id)
+            success += 1
+            time.sleep(0.1)
+        except: continue
+    bot.send_message(message.chat.id, f"📢 চ্যানেল/গ্রুপ ব্রডকাস্ট শেষ! {success}টি চ্যাটে পাঠানো হয়েছে।")
 
 @bot.message_handler(commands=['set_logo'])
 def set_logo(message):
@@ -275,31 +333,6 @@ def set_logo(message):
         bot.reply_to(message, "✅ লগো সফলভাবে সেট করা হয়েছে।")
     except:
         bot.reply_to(message, "ব্যবহার: `/set_logo URL_LINK`")
-
-@bot.message_handler(commands=['status'])
-def status(message):
-    if message.from_user.id != ADMIN_ID: return
-    u_count = users_col.count_documents({})
-    f_count = links_col.count_documents({})
-    settings = get_settings()
-    fsub_status = "✅ চালু" if settings.get('fsub_active', True) else "❌ বন্ধ"
-    bot.reply_to(message, f"📊 **বট স্ট্যাটাস**\n\n👥 মোট ইউজার: {u_count}\n📁 মোট ফাইল: {f_count}\n📢 ফোর্স সাবস্ক্রাইব: {fsub_status}", parse_mode="Markdown")
-
-@bot.message_handler(commands=['broadcast'])
-def broadcast(message):
-    if message.from_user.id != ADMIN_ID: return
-    if not message.reply_to_message:
-        return bot.reply_to(message, "মেসেজটি রিপ্লাই দিন এবং লিখুন `/broadcast`")
-    
-    users = users_col.find({})
-    success = 0
-    for u in users:
-        try:
-            bot.copy_message(u['user_id'], message.chat.id, message.reply_to_message.message_id)
-            success += 1
-            time.sleep(0.05)
-        except: continue
-    bot.send_message(message.chat.id, f"✅ ব্রডকাস্ট শেষ! {success} জন ইউজারকে পাঠানো হয়েছে।")
 
 @bot.message_handler(commands=['log_cnl', 'send_cnl'])
 def set_channels(message):
@@ -320,7 +353,6 @@ def set_force(message):
         if not ids_text:
             settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": []}})
             return bot.reply_to(message, "✅ ফোর্স সাবস্ক্রাইব রিমুভ করা হয়েছে।")
-        
         ids = [int(i.strip()) for i in ids_text.split(',') if i.strip()]
         settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": ids}}, upsert=True)
         bot.reply_to(message, f"✅ আপডেট হয়েছে। মোট চ্যানেল: {len(ids)}")
@@ -332,7 +364,6 @@ def set_force(message):
 @bot.message_handler(content_types=['document', 'video', 'audio', 'photo', 'voice', 'animation'])
 def handle_files(message):
     if message.from_user.id != ADMIN_ID: return
-    
     settings = get_settings()
     if not settings.get('log_channel'):
         return bot.reply_to(message, "❌ আগে `/log_cnl -100xxx` সেট করুন।")
@@ -342,25 +373,10 @@ def handle_files(message):
     short_link = get_short_link(raw_link)
 
     try:
-        # ফাইলটি লগ চ্যানেলে কপি করা
         sent_log = bot.copy_message(settings['log_channel'], message.chat.id, message.message_id)
-        
-        # ডাটাবেসে সেভ করা
-        links_col.insert_one({
-            "key": key,
-            "msg_id": sent_log.message_id,
-            "log_channel": settings['log_channel']
-        })
-        
-        # এডমিনকে লিঙ্ক দেওয়া
+        links_col.insert_one({"key": key, "msg_id": sent_log.message_id, "log_channel": settings['log_channel']})
         btn = types.InlineKeyboardButton("🔗 Short Link", url=short_link)
-        markup = types.InlineKeyboardMarkup().add(btn)
-        
-        bot.reply_to(message, 
-            f"✅ **ফাইল সেভ হয়েছে!**\n\n🔗 সর্ট লিঙ্ক: `{short_link}`\n🔗 ডিরেক্ট লিঙ্ক: `{raw_link}`", 
-            parse_mode="Markdown", 
-            reply_markup=markup
-        )
+        bot.reply_to(message, f"✅ **ফাইল সেভ হয়েছে!**\n\n🔗 সর্ট লিঙ্ক: `{short_link}`\n🔗 ডিরেক্ট লিঙ্ক: `{raw_link}`", parse_mode="Markdown", reply_markup=types.InlineKeyboardMarkup().add(btn))
     except Exception as e:
         bot.reply_to(message, f"❌ ভুল হয়েছে: {str(e)}")
 

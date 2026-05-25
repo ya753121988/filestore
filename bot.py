@@ -76,7 +76,7 @@ def get_channel_buttons(extra_buttons=None):
             markup.add(b)
             
     # এডমিন কন্টাক্ট বাটন যোগ করা হয়েছে
-    admin_btn = types.InlineKeyboardButton("👨‍💻 Admin Contact", url="https://t.me/mdakash_dev") # এখানে আপনার ইউজারনেম দিতে পারেন
+    admin_btn = types.InlineKeyboardButton("👨‍💻 Admin Contact", url="https://t.me/AllDramaKingsAdminBot") # এখানে আপনার ইউজারনেম দিতে পারেন
     markup.add(admin_btn)
     
     return markup

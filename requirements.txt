@@ -1,8 +1,5 @@
-pyTelegramBotAPI==4.12.0
-pyrogram==2.0.106
-tgcrypto
-flask
+pyTelegramBotAPI
 pymongo
 requests
+flask
 dnspython
-gunicorn

@@ -3,6 +3,7 @@ import telebot
 import uuid
 import requests
 import time
+import re
 from flask import Flask, request
 from pymongo import MongoClient
 from telebot import types
@@ -26,6 +27,9 @@ links_col = db['links']
 settings_col = db['settings']
 users_col = db['users']
 
+# ব্যাচ প্রসেস ট্র্যাক করার জন্য
+user_states = {}
+
 # --- ডাটাবেস ফাংশন ---
 def get_settings():
     settings = settings_col.find_one({"id": "bot_settings"})
@@ -41,6 +45,11 @@ def get_settings():
         settings_col.insert_one(default)
         return default
     return settings
+
+# --- লিঙ্ক থেকে আইডি বের করার ফাংশন ---
+def get_message_id(text):
+    match = re.search(r"(\d+)$", text)
+    return int(match.group(1)) if match else None
 
 # --- ফোর্স সাবস্ক্রাইব চেক ---
 def is_subscribed(user_id):
@@ -131,54 +140,54 @@ def start(message):
         # ডাটাবেস থেকে ফাইল খোঁজা
         data = links_col.find_one({"key": key})
         if data:
-            if settings.get('send_channel'):
+            # চেক করা হচ্ছে এটি সিঙ্গেল ফাইল নাকি ব্যাচ
+            if "start_id" in data and "end_id" in data:
+                msg_ids = list(range(data['start_id'], data['end_id'] + 1))
+            else:
+                msg_ids = [data['msg_id']]
+
+            last_sent_id = None
+            for m_id in msg_ids:
                 try:
-                    # ফাইল চ্যানেলে পাঠানো এবং মেসেজ আইডি নেওয়া
-                    sent_to_channel = bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'])
-                    
-                    # চ্যানেলের লিঙ্ক ও পোস্ট লিঙ্ক তৈরি
+                    if settings.get('send_channel'):
+                        sent_to_channel = bot.copy_message(settings['send_channel'], data['log_channel'], m_id)
+                        last_sent_id = sent_to_channel.message_id
+                    else:
+                        bot.copy_message(message.chat.id, data['log_channel'], m_id)
+                    time.sleep(0.5) # রেট লিমিট এড়াতে
+                except:
+                    continue
+
+            if settings.get('send_channel') and last_sent_id:
+                try:
                     chat_info = bot.get_chat(settings['send_channel'])
-                    
-                    # চ্যানেল মেইন লিঙ্ক তৈরি
                     if chat_info.username:
                         main_channel_link = f"https://t.me/{chat_info.username}"
-                        post_link = f"https://t.me/{chat_info.username}/{sent_to_channel.message_id}"
-                        channel_display = f"@{chat_info.username}"
+                        post_link = f"https://t.me/{chat_info.username}/{last_sent_id}"
                     else:
-                        # প্রাইভেট চ্যানেলের জন্য ইনভাইট লিঙ্ক ব্যবহার
                         main_channel_link = bot.export_chat_invite_link(settings['send_channel'])
                         clean_id = str(settings['send_channel']).replace("-100", "")
-                        post_link = f"https://t.me/c/{clean_id}/{sent_to_channel.message_id}"
-                        channel_display = "আমাদের চ্যানেল"
+                        post_link = f"https://t.me/c/{clean_id}/{last_sent_id}"
 
                     response_text = (
-                        "✅ **ফাইলটি সফলভাবে চ্যানেলে পাঠানো হয়েছে!**\n\n"
+                        "✅ **ফাইলগুলো সফলভাবে চ্যানেলে পাঠানো হয়েছে!**\n\n"
                         f"📢 **চ্যানেল লিঙ্ক:** [এখানে ক্লিক করুন]({main_channel_link})\n"
-                        f"🚀 **ফাইলের পোস্ট লিঙ্ক:** [এখানে ক্লিক করুন]({post_link})\n\n"
+                        f"🚀 **শেষ ফাইলের পোস্ট লিঙ্ক:** [এখানে ক্লিক করুন]({post_link})\n\n"
                         "👆 ওপরের লিঙ্কে ক্লিক করলে সরাসরি ফাইলে নিয়ে যাবে।"
                     )
-                    
                     action_btns = types.InlineKeyboardMarkup(row_width=1)
                     action_btns.add(
                         types.InlineKeyboardButton("📢 Join Main Channel", url=main_channel_link),
                         types.InlineKeyboardButton("📂 View File Post", url=post_link)
                     )
-                    
                     bot.send_message(message.chat.id, response_text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=action_btns)
-                    
-                except Exception as e:
-                    bot.send_message(message.chat.id, f"❌ ভুল: {str(e)}")
-            else:
-                # যদি send_channel সেট না থাকে তবে সরাসরি ইউজারকে ফাইল পাঠানো
-                try:
-                    bot.copy_message(message.chat.id, data['log_channel'], data['msg_id'])
                 except:
-                    bot.send_message(message.chat.id, "❌ ফাইলটি পাঠানো সম্ভব হচ্ছে না। এডমিনকে জানান।")
+                    bot.send_message(message.chat.id, "✅ ফাইলগুলো চ্যানেলে পাঠানো হয়েছে।")
         else:
-            bot.send_message(message.chat.id, "❌ দুঃখিত, ফাইলটি খুঁজে পাওয়া যায়নি বা ডাটাবেস থেকে মুছে ফেলা হয়েছে।")
+            bot.send_message(message.chat.id, "❌ দুঃখিত, ফাইলটি খুঁজে পাওয়া যায়নি।")
         return
 
-    # সাধারণ স্টার্ট মেসেজ (Deep Link ছাড়া)
+    # সাধারণ স্টার্ট মেসেজ
     user = message.from_user
     start_text = (
         f"👋 হ্যালো, **{user.first_name}**\n\n"
@@ -193,6 +202,58 @@ def start(message):
 
 # --- এডমিন কমান্ডস ---
 
+@bot.message_handler(commands=['add'])
+def add_batch(message):
+    if message.from_user.id != ADMIN_ID: return
+    user_states[message.from_user.id] = {'step': 1}
+    bot.send_message(message.chat.id, "🔢 ব্যাচ সিস্টেম শুরু হয়েছে।\n\nআপনার **প্রথম** ফাইল বা মেসেজের লিঙ্কটি দিন (Log Channel থেকে):")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id, {}).get('step') == 1)
+def process_step_1(message):
+    m_id = get_message_id(message.text)
+    if m_id:
+        user_states[message.from_user.id]['start_id'] = m_id
+        user_states[message.from_user.id]['step'] = 2
+        bot.send_message(message.chat.id, "✅ প্রথম আইডি পাওয়া গেছে।\n\nএখন ওই রেঞ্জের **শেষ** ফাইল বা মেসেজের লিঙ্কটি দিন:")
+    else:
+        bot.send_message(message.chat.id, "❌ ভুল লিঙ্ক। সঠিক মেসেজ লিঙ্ক দিন।")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id, {}).get('step') == 2)
+def process_step_2(message):
+    m_id = get_message_id(message.text)
+    if m_id:
+        admin_data = user_states[message.from_user.id]
+        start_id = admin_data['start_id']
+        end_id = m_id
+        
+        settings = get_settings()
+        if not settings.get('log_channel'):
+            return bot.reply_to(message, "❌ আগে `/log_cnl` সেট করুন।")
+
+        key = str(uuid.uuid4())[:8]
+        raw_link = f"https://t.me/{bot.get_me().username}?start={key}"
+        short_link = get_short_link(raw_link)
+
+        # ডাটাবেসে ব্যাচ সেভ
+        links_col.insert_one({
+            "key": key,
+            "start_id": start_id,
+            "end_id": end_id,
+            "log_channel": settings['log_channel']
+        })
+
+        del user_states[message.from_user.id]
+        
+        bot.send_message(message.chat.id, 
+            f"✅ **ব্যাচ লিঙ্ক তৈরি হয়েছে!**\n\n"
+            f"📦 রেঞ্জ: `{start_id}` থেকে `{end_id}`\n"
+            f"🔗 সর্ট লিঙ্ক: `{short_link}`\n"
+            f"🔗 ডিরেক্ট লিঙ্ক: `{raw_link}`", 
+            parse_mode="Markdown"
+        )
+    else:
+        bot.send_message(message.chat.id, "❌ ভুল লিঙ্ক। শেষ মেসেজ লিঙ্কটি দিন।")
+
 @bot.message_handler(commands=['fsub_on'])
 def fsub_on(message):
     if message.from_user.id != ADMIN_ID: return
@@ -203,7 +264,7 @@ def fsub_on(message):
 def fsub_off(message):
     if message.from_user.id != ADMIN_ID: return
     settings_col.update_one({"id": "bot_settings"}, {"$set": {"fsub_active": False}}, upsert=True)
-    bot.reply_to(message, "⚠️ **ফোর্স সাবস্ক্রাইব (Must Join) অফ করা হয়েছে। এখন যে কেউ জয়েন না করেই ফাইল পাবে।**")
+    bot.reply_to(message, "⚠️ **ফোর্স সাবস্ক্রাইব (Must Join) অফ করা হয়েছে।**")
 
 @bot.message_handler(commands=['set_logo'])
 def set_logo(message):
@@ -266,7 +327,7 @@ def set_force(message):
     except:
         bot.reply_to(message, "ভুল ফরম্যাট। উদাহরণ: `/set_force -1001, -1002`")
 
-# --- ফাইল হ্যান্ডলিং ---
+# --- ফাইল হ্যান্ডলিং (Single File) ---
 
 @bot.message_handler(content_types=['document', 'video', 'audio', 'photo', 'voice', 'animation'])
 def handle_files(message):

@@ -11,7 +11,7 @@ from telebot import types
 API_TOKEN = os.getenv('API_TOKEN', '8501387772:AAH8dn31CMywDrF0nSjM7TMfB2uA8i-Nfzg')
 MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://drama:drama@cluster0.sa4kvgu.mongodb.net/DramaStoreDB?retryWrites=true&w=majority&appName=Cluster0')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '8932594210'))
-WEB_URL = os.getenv('WEB_URL', 'https://filestore-jet.vercel.app') # আপনার অ্যাপ URL
+WEB_URL = os.getenv('WEB_URL', 'https://official-elene-akashvaikh-d4e6b245.koyeb.app') # আপনার অ্যাপ URL
 
 # শর্ট লিঙ্ক সেটিংস
 SHORTENER_URL = "https://urlbotsot.vercel.app/api"

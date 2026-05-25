@@ -2,11 +2,11 @@ import os
 import telebot
 import uuid
 import requests
-import asyncio
-from flask import Flask, request, Response, stream_with_context
+import threading
+import time
+from flask import Flask, request
 from pymongo import MongoClient
 from telebot import types
-from pyrogram import Client
 
 # --- কনফিগারেশন (আপনার দেওয়া তথ্য অনুযায়ী) ---
 API_ID = 29904834
@@ -21,25 +21,29 @@ SHORTENER_URL = "https://urlbotsot.vercel.app/api"
 SHORTENER_API = "akashdeveloper"
 
 # বট ও ডাটাবেস ইনিশিয়ালাইজ
-bot = telebot.TeleBot(API_TOKEN, threaded=False)
+bot = telebot.TeleBot(API_TOKEN, threaded=True)
 app = Flask(__name__)
 client = MongoClient(MONGO_URI)
 db = client['DramaStoreDB']
 links_col = db['links']
 settings_col = db['settings']
-
-# Pyrogram Client (বড় ফাইল স্ট্রিমিংয়ের জন্য)
-tg_client = Client("stream_bot", api_id=API_ID, api_hash=API_HASH, bot_token=API_TOKEN)
+users_col = db['users'] # ব্রডকাস্টের জন্য ইউজার ডাটাবেস
 
 def get_settings():
     settings = settings_col.find_one({"id": "bot_settings"})
     if not settings:
-        default = {"id": "bot_settings", "log_channel": None, "send_channel": None, "force_channels": []}
+        default = {
+            "id": "bot_settings", 
+            "log_channel": None, 
+            "send_channel": None, 
+            "force_channels": [],
+            "logo_url": "https://telegra.ph/file/default-logo.jpg"
+        }
         settings_col.insert_one(default)
         return default
     return settings
 
-# --- বাটন জেনারেটর (ইউজারদের জন্য) ---
+# --- বাটন জেনারেটর ---
 def get_channel_buttons(extra_buttons=None):
     settings = get_settings()
     channels = settings.get('force_channels', [])
@@ -51,9 +55,13 @@ def get_channel_buttons(extra_buttons=None):
             link = f"https://t.me/{chat.username}" if chat.username else bot.export_chat_invite_link(cid)
             btns.append(types.InlineKeyboardButton(f"Join Channel {i} 📢", url=link))
         except: continue
-    markup.add(*btns)
+    
+    if btns:
+        markup.add(*btns)
+    
     if extra_buttons:
-        for b in extra_buttons: markup.add(b)
+        for b in extra_buttons:
+            markup.add(b)
     return markup
 
 # --- লিঙ্ক শর্টনার ---
@@ -64,70 +72,84 @@ def get_short_link(long_url):
         return data.get('shortenedUrl') if data.get('status') == 'success' else long_url
     except: return long_url
 
-# --- ফাইল স্ট্রিমিং লজিক (Bypassing 20MB Limit) ---
-async def generate_file_stream(file_id):
-    async with tg_client:
-        async for chunk in tg_client.download_media(file_id, byte_offset=0, in_memory=True):
-            yield chunk
-
-@app.route("/dl/<key>")
-def stream_file(key):
-    data = links_col.find_one({"key": key})
-    if not data: return "File not found!", 404
-    
-    file_id = data.get('file_id')
-    file_name = data.get('file_name', 'download_file')
-    
-    # ব্রাউজারকে ফাইল ডাউনলোডের প্রম্পট পাঠানো
-    headers = {
-        'Content-Disposition': f'attachment; filename="{file_name}"',
-        'Content-Type': 'application/octet-stream'
-    }
-    
-    # Async স্ট্রিমিং চালু করা
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    def stream():
-        # এটি টেলিগ্রাম থেকে ফাইল চাঙ্ক আকারে নিয়ে ব্রাউজারে পাঠাবে
-        with tg_client:
-            media = tg_client.get_messages(data['log_channel'], data['msg_id'])
-            for chunk in tg_client.stream_media(media):
-                yield chunk
-
-    return Response(stream_with_context(stream()), headers=headers)
-
 # --- বটের কমান্ডস ও ফিচারস ---
-
-@app.route('/' + API_TOKEN, methods=['POST'])
-def getMessage():
-    bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
-    return "!", 200
-
-@app.route("/")
-def index():
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{WEB_URL}/{API_TOKEN}")
-    return "<h1>File Stream Bot & Server is Live!</h1>", 200
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    # ইউজার সেভ করা ব্রডকাস্টের জন্য
+    if not users_col.find_one({"user_id": message.from_user.id}):
+        users_col.insert_one({"user_id": message.from_user.id})
+
+    settings = get_settings()
     args = message.text.split()
+    
+    # ফাইল রিকোয়েস্ট হ্যান্ডেলিং
     if len(args) > 1:
         data = links_col.find_one({"key": args[1]})
-        settings = get_settings()
         if data and settings.get('send_channel'):
-            sent = bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'])
+            # ফাইল কপি করার সময় বাটন সহ পাঠানো (ইউজার চ্যানেলে)
+            btn_tg = types.InlineKeyboardButton("🚀 Watch on Telegram", url=f"https://t.me/{bot.get_me().username}?start={args[1]}")
+            markup = get_channel_buttons([btn_tg])
+            
+            sent = bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'], reply_markup=markup)
+            
             c_info = bot.get_chat(settings['send_channel'])
             m_link = f"https://t.me/{c_info.username}/{sent.message_id}" if c_info.username else f"https://t.me/c/{str(settings['send_channel']).replace('-100','')}/{sent.message_id}"
             
-            btn_watch = types.InlineKeyboardButton("🚀 Watch on Telegram", url=m_link)
-            btn_browser = types.InlineKeyboardButton("🌐 Web Download (Browser)", url=get_short_link(f"{WEB_URL}/dl/{args[1]}"))
-            bot.send_message(message.chat.id, "✅ ফাইল রেডি! নিচের বাটন থেকে ডাউনলোড করুন:", reply_markup=get_channel_buttons([btn_watch, btn_browser]))
+            bot.send_message(message.chat.id, "✅ ফাইল আপনার চ্যানেলে পাঠানো হয়েছে।", reply_markup=get_channel_buttons())
         return
-    bot.send_message(message.chat.id, "স্বাগতম! চ্যানেল জয়েন করে ফাইল রিসিভ করুন।", reply_markup=get_channel_buttons())
 
-# --- এডমিন ম্যানেজমেন্ট ---
+    # সাধারণ স্টার্ট মেসেজ
+    user = message.from_user
+    full_name = f"{user.first_name} {user.last_name or ''}"
+    start_text = (
+        f"👋 স্বাগতম, **{full_name}**\n\n"
+        f"🆔 **ইউজার আইডি:** `{user.id}`\n"
+        f"👤 **ইউজার নেম:** @{user.username or 'N/A'}\n"
+        f"📛 **ফার্স্ট নেম:** {user.first_name}\n"
+        f"📛 **লাস্ট নেম:** {user.last_name or 'N/A'}\n\n"
+        "নিচের চ্যানেলগুলোতে জয়েন করে ফাইল রিসিভ করুন।"
+    )
+    
+    try:
+        bot.send_photo(message.chat.id, settings.get('logo_url'), caption=start_text, reply_markup=get_channel_buttons(), parse_mode="Markdown")
+    except:
+        bot.send_message(message.chat.id, start_text, reply_markup=get_channel_buttons(), parse_mode="Markdown")
+
+# --- এডমিন প্যানেল ---
+
+@bot.message_handler(commands=['set_logo'])
+def set_logo(message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        new_logo = message.text.split()[1]
+        settings_col.update_one({"id": "bot_settings"}, {"$set": {"logo_url": new_logo}}, upsert=True)
+        bot.reply_to(message, "✅ বটের লগো আপডেট হয়েছে!")
+    except:
+        bot.reply_to(message, "সঠিকভাবে কমান্ড দিন: `/set_logo URL`")
+
+@bot.message_handler(commands=['status'])
+def status(message):
+    if message.from_user.id != ADMIN_ID: return
+    total_users = users_col.count_documents({})
+    total_files = links_col.count_documents({})
+    bot.reply_to(message, f"📊 **বট স্ট্যাটাস:**\n\n👥 মোট ইউজার: {total_users}\n📁 মোট ফাইল লিঙ্ক: {total_files}", parse_mode="Markdown")
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    if message.from_user.id != ADMIN_ID: return
+    if not message.reply_to_message:
+        return bot.reply_to(message, "যে মেসেজটি ব্রডকাস্ট করতে চান সেটি রিপ্লাই দিন।")
+    
+    users = users_col.find({})
+    count = 0
+    for user in users:
+        try:
+            bot.copy_message(user['user_id'], message.chat.id, message.reply_to_message.message_id)
+            count += 1
+            time.sleep(0.1) # টেলিগ্রাম লিমিট এড়াতে
+        except: continue
+    bot.send_message(message.chat.id, f"✅ ব্রডকাস্ট সম্পন্ন! {count} জন ইউজারের কাছে পাঠানো হয়েছে।")
 
 @bot.message_handler(commands=['set_force'])
 def set_force(message):
@@ -140,26 +162,6 @@ def set_force(message):
         bot.reply_to(message, "✅ চ্যানেলগুলো যোগ হয়েছে।")
     except: bot.reply_to(message, "সঠিক আইডি দিন।")
 
-@bot.message_handler(commands=['manage_channels'])
-def manage_channels(message):
-    if message.from_user.id != ADMIN_ID: return
-    channels = get_settings().get('force_channels', [])
-    markup = types.InlineKeyboardMarkup()
-    for cid in channels:
-        markup.add(types.InlineKeyboardButton(f"Channel: {cid}", callback_data="n"),
-                   types.InlineKeyboardButton("❌ Delete", callback_data=f"del_{cid}"))
-    bot.send_message(message.chat.id, "⚙️ চ্যানেল রিমুভ করুন:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('del_'))
-def del_callback(call):
-    cid = int(call.data.split('_')[1])
-    settings = get_settings()
-    channels = settings.get('force_channels', [])
-    if cid in channels:
-        channels.remove(cid)
-        settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": channels}})
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-
 @bot.message_handler(commands=['log_cnl', 'send_cnl'])
 def admin_set_cnl(message):
     if message.from_user.id != ADMIN_ID: return
@@ -170,26 +172,40 @@ def admin_set_cnl(message):
         bot.reply_to(message, f"✅ {key} আপডেট হয়েছে!")
     except: pass
 
-# --- ফাইল সেভ ও লগ চ্যানেলে বাটন যুক্ত করা ---
+# --- সব ধরণের ফাইল হ্যান্ডলিং (Video, Audio, Photo, Document) ---
 
-@bot.message_handler(content_types=['document', 'video', 'audio'])
+@bot.message_handler(content_types=['document', 'video', 'audio', 'photo', 'voice', 'animation'])
 def handle_admin_files(message):
     if message.from_user.id != ADMIN_ID: return
     settings = get_settings()
     if not settings.get('log_channel'): return bot.reply_to(message, "আগে `/log_cnl` সেট করুন।")
 
-    file_obj = message.document or message.video or message.audio
-    file_id = file_obj.file_id
-    file_name = getattr(file_obj, 'file_name', 'video_file.mp4')
+    file_id = ""
+    file_name = "File"
     
+    if message.content_type == 'photo':
+        file_id = message.photo[-1].file_id
+        file_name = "Photo"
+    elif message.content_type == 'video':
+        file_id = message.video.file_id
+        file_name = getattr(message.video, 'file_name', 'Video')
+    elif message.content_type == 'document':
+        file_id = message.document.file_id
+        file_name = message.document.file_name
+    elif message.content_type == 'audio':
+        file_id = message.audio.file_id
+        file_name = getattr(message.audio, 'file_name', 'Audio')
+    else:
+        # voice/animation
+        file_id = message.voice.file_id if message.voice else message.animation.file_id
+        file_name = "Media File"
+
     key = str(uuid.uuid4())[:8]
     tg_link = get_short_link(f"https://t.me/{bot.get_me().username}?start={key}")
-    web_link = get_short_link(f"{WEB_URL}/dl/{key}")
 
-    # বাটন তৈরি (লগ চ্যানেলের জন্য)
+    # বাটন তৈরি (লগ চ্যানেল এবং ইউজার চ্যানেলের জন্য)
     btn_tg = types.InlineKeyboardButton("🤖 Bot Link", url=tg_link)
-    btn_web = types.InlineKeyboardButton("🌐 Direct Web Download", url=web_link)
-    markup = get_channel_buttons([btn_tg, btn_web])
+    markup = get_channel_buttons([btn_tg])
 
     # লগ চ্যানেলে ফাইল পাঠানো
     sent = bot.copy_message(settings['log_channel'], message.chat.id, message.message_id, reply_markup=markup)
@@ -203,9 +219,29 @@ def handle_admin_files(message):
         "file_name": file_name
     })
 
-    bot.reply_to(message, f"✅ **ফাইল সেভ হয়েছে!**\n\n🤖 TG লিঙ্ক: `{tg_link}`\n🌐 ওয়েব লিঙ্ক: `{web_link}`", 
+    bot.reply_to(message, f"✅ **ফাইল লিঙ্ক তৈরি হয়েছে!**\n\n🤖 TG লিঙ্ক: `{tg_link}`", 
                  reply_markup=markup, parse_mode="Markdown")
 
+# --- বট সচল রাখার মেকানিজম (Keep Alive) ---
+def keep_alive():
+    while True:
+        try:
+            requests.get(WEB_URL)
+            time.sleep(600) # প্রতি ১০ মিনিটে একবার পিং করবে
+        except: pass
+
+# --- ফ্লাস্ক ও সার্ভার ---
+@app.route('/' + API_TOKEN, methods=['POST'])
+def getMessage():
+    bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
+    return "!", 200
+
+@app.route("/")
+def index():
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{WEB_URL}/{API_TOKEN}")
+    return "<h1>Bot is Running...</h1>", 200
+
 if __name__ == "__main__":
-    tg_client.start() # Pyrogram স্টার্ট
+    threading.Thread(target=keep_alive, daemon=True).start()
     app.run(host="0.0.0.0", port=5000)

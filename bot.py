@@ -43,6 +43,8 @@ def get_settings():
 
 # --- ফোর্স সাবস্ক্রাইব চেক ---
 def is_subscribed(user_id):
+    if user_id == ADMIN_ID:
+        return True
     settings = get_settings()
     channels = settings.get('force_channels', [])
     if not channels:
@@ -54,6 +56,7 @@ def is_subscribed(user_id):
             if status in ['left', 'kicked']:
                 return False
         except Exception:
+            # যদি বট চ্যানেলে এডমিন না থাকে তবে চেক স্কিপ করবে
             continue 
     return True
 
@@ -96,13 +99,15 @@ def get_short_link(long_url):
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
-    # ইউজার সেভ
+    
+    # ইউজার ডাটাবেসে সেভ করা
     if not users_col.find_one({"user_id": user_id}):
         users_col.insert_one({"user_id": user_id})
 
     settings = get_settings()
     args = message.text.split()
     
+    # যদি স্টার্ট লিঙ্কে ফাইল কি (Key) থাকে
     if len(args) > 1:
         key = args[1]
         
@@ -116,41 +121,32 @@ def start(message):
                 parse_mode="Markdown"
             )
 
+        # ডাটাবেস থেকে ফাইল খোঁজা
         data = links_col.find_one({"key": key})
         if data:
             if settings.get('send_channel'):
-                bot_link_raw = f"https://t.me/{bot.get_me().username}?start={key}"
-                u_btn = types.InlineKeyboardButton("🤖 Bot Link", url=get_short_link(bot_link_raw))
-                markup = get_channel_buttons([u_btn])
-                
                 try:
                     # ফাইল চ্যানেলে পাঠানো এবং মেসেজ আইডি নেওয়া
-                    sent_to_channel = bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'], reply_markup=markup)
+                    # এখানে bot.copy_message ব্যবহার করা হয়েছে যাতে ফাইলটি ইউজার চ্যানেলে যায়
+                    sent_to_channel = bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'])
                     
-                    # ইউজার চ্যানেলের লিঙ্ক এবং পোস্ট লিঙ্ক বের করা
-                    try:
-                        chat_info = bot.get_chat(settings['send_channel'])
-                        if chat_info.username:
-                            channel_link = f"https://t.me/{chat_info.username}"
-                            post_link = f"https://t.me/{chat_info.username}/{sent_to_channel.message_id}"
-                        else:
-                            channel_link = "Private Channel"
-                            # প্রাইভেট চ্যানেলের লিঙ্ক ফরম্যাট (যদি ইউজার জয়েন থাকে)
-                            clean_id = str(settings['send_channel']).replace("-100", "")
-                            post_link = f"https://t.me/c/{clean_id}/{sent_to_channel.message_id}"
-                    except:
-                        channel_link = "Channel"
-                        post_link = "N/A"
+                    # চ্যানেলের লিঙ্ক ও পোস্ট লিঙ্ক তৈরি
+                    chat_info = bot.get_chat(settings['send_channel'])
+                    if chat_info.username:
+                        post_link = f"https://t.me/{chat_info.username}/{sent_to_channel.message_id}"
+                        channel_link = f"@{chat_info.username}"
+                    else:
+                        clean_id = str(settings['send_channel']).replace("-100", "")
+                        post_link = f"https://t.me/c/{clean_id}/{sent_to_channel.message_id}"
+                        channel_link = "Private Channel"
 
-                    # ইউজারকে চ্যানেলের তথ্য ও সরাসরি ফাইলের লিঙ্ক দেওয়া
                     response_text = (
-                        "✅ **ফাইলটি আমাদের ইউজার চ্যানেলে পাঠানো হয়েছে!**\n\n"
-                        f"📢 **চ্যানেল লিঙ্ক:** {channel_link}\n"
+                        "✅ **ফাইলটি আমাদের চ্যানেলে পাঠানো হয়েছে!**\n\n"
+                        f"📢 **চ্যানেল:** {channel_link}\n"
                         f"🚀 **ফাইলের সরাসরি লিঙ্ক:** [এখানে ক্লিক করুন]({post_link})\n\n"
                         "👆 ওপরের লিঙ্কে ক্লিক করলে সরাসরি ফাইলে নিয়ে যাবে।"
                     )
                     
-                    # বাটন আকারেও দেওয়া হলো সুবিধার জন্য
                     action_btns = types.InlineKeyboardMarkup()
                     action_btns.add(types.InlineKeyboardButton("📂 View File in Channel", url=post_link))
                     
@@ -159,18 +155,21 @@ def start(message):
                 except Exception as e:
                     bot.send_message(message.chat.id, f"❌ ভুল: {str(e)}")
             else:
-                bot.send_message(message.chat.id, "❌ এডমিন এখনো 'Send Channel' সেট করেনি।")
+                # যদি send_channel সেট না থাকে তবে সরাসরি ইউজারকে ফাইল পাঠানো (বিকল্প ব্যবস্থা)
+                try:
+                    bot.copy_message(message.chat.id, data['log_channel'], data['msg_id'])
+                except:
+                    bot.send_message(message.chat.id, "❌ ফাইলটি পাঠানো সম্ভব হচ্ছে না। এডমিনকে জানান।")
         else:
-            bot.send_message(message.chat.id, "❌ দুঃখিত, ফাইলটি খুঁজে পাওয়া যায়নি।")
+            bot.send_message(message.chat.id, "❌ দুঃখিত, ফাইলটি খুঁজে পাওয়া যায়নি বা ডাটাবেস থেকে মুছে ফেলা হয়েছে।")
         return
 
-    # সাধারণ স্টার্ট মেসেজ
+    # সাধারণ স্টার্ট মেসেজ (Deep Link ছাড়া)
     user = message.from_user
     start_text = (
         f"👋 হ্যালো, **{user.first_name}**\n\n"
         f"🆔 ইউজার আইডি: `{user.id}`\n"
-        f"👤 ইউজারনেম: @{user.username or 'N/A'}\n\n"
-        "ফাইল পেতে নিচের বাটন থেকে চ্যানেলে জয়েন করুন।"
+        "আমাদের বট থেকে ফাইল পেতে চ্যানেলে জয়েন থাকা বাধ্যতামূলক।"
     )
     
     try:
@@ -197,17 +196,11 @@ def status(message):
     f_count = links_col.count_documents({})
     bot.reply_to(message, f"📊 **বট স্ট্যাটাস**\n\n👥 মোট ইউজার: {u_count}\n📁 মোট ফাইল: {f_count}", parse_mode="Markdown")
 
-@bot.message_handler(commands=['del_all_files'])
-def delete_files(message):
-    if message.from_user.id != ADMIN_ID: return
-    links_col.delete_many({})
-    bot.reply_to(message, "🗑️ ডাটাবেস থেকে সকল ফাইল রিমুভ করা হয়েছে।")
-
 @bot.message_handler(commands=['broadcast'])
 def broadcast(message):
     if message.from_user.id != ADMIN_ID: return
     if not message.reply_to_message:
-        return bot.reply_to(message, "যে মেসেজটি পাঠাতে চান সেটি রিপ্লাই দিয়ে লিখুন `/broadcast`")
+        return bot.reply_to(message, "মেসেজটি রিপ্লাই দিন এবং লিখুন `/broadcast`")
     
     users = users_col.find({})
     success = 0
@@ -241,33 +234,38 @@ def set_force(message):
         
         ids = [int(i.strip()) for i in ids_text.split(',') if i.strip()]
         settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": ids}}, upsert=True)
-        bot.reply_to(message, f"✅ ফোর্স সাবস্ক্রাইব চ্যানেল আপডেট হয়েছে। (মোট: {len(ids)})")
-    except Exception as e:
-        bot.reply_to(message, f"ভুল হয়েছে। উদাহরণ: `/set_force -1001, -1002` \nError: {e}")
+        bot.reply_to(message, f"✅ আপডেট হয়েছে। মোট চ্যানেল: {len(ids)}")
+    except:
+        bot.reply_to(message, "ভুল ফরম্যাট। উদাহরণ: `/set_force -1001, -1002`")
 
-# --- ফাইল হ্যান্ডলিং ---
+# --- ফাইল হ্যান্ডলিং (শুধুমাত্র এডমিন ফাইল সেভ করতে পারবে) ---
 
 @bot.message_handler(content_types=['document', 'video', 'audio', 'photo', 'voice', 'animation'])
 def handle_files(message):
     if message.from_user.id != ADMIN_ID: return
+    
     settings = get_settings()
     if not settings.get('log_channel'):
-        return bot.reply_to(message, "❌ আগে `/log_cnl` দিয়ে লগ চ্যানেল সেট করুন।")
+        return bot.reply_to(message, "❌ আগে `/log_cnl -100xxx` সেট করুন।")
 
     key = str(uuid.uuid4())[:8]
     raw_link = f"https://t.me/{bot.get_me().username}?start={key}"
     short_link = get_short_link(raw_link)
 
-    btn = types.InlineKeyboardButton("🤖 Bot Link", url=short_link)
-    markup = get_channel_buttons([btn])
-
     try:
+        # ফাইলটি লগ চ্যানেলে কপি করা
         sent_log = bot.copy_message(settings['log_channel'], message.chat.id, message.message_id)
+        
+        # ডাটাবেসে সেভ করা
         links_col.insert_one({
             "key": key,
             "msg_id": sent_log.message_id,
             "log_channel": settings['log_channel']
         })
+        
+        # এডমিনকে লিঙ্ক দেওয়া
+        btn = types.InlineKeyboardButton("🔗 Short Link", url=short_link)
+        markup = types.InlineKeyboardMarkup().add(btn)
         
         bot.reply_to(message, 
             f"✅ **ফাইল সেভ হয়েছে!**\n\n🔗 সর্ট লিঙ্ক: `{short_link}`\n🔗 ডিরেক্ট লিঙ্ক: `{raw_link}`", 
@@ -275,9 +273,9 @@ def handle_files(message):
             reply_markup=markup
         )
     except Exception as e:
-        bot.reply_to(message, f"❌ এরর: {str(e)}")
+        bot.reply_to(message, f"❌ ভুল হয়েছে: {str(e)}")
 
-# --- সার্ভার সেটআপ ---
+# --- সার্ভার ও ওয়েবহুক সেটআপ ---
 
 @app.route('/' + API_TOKEN, methods=['POST'])
 def getMessage():

@@ -11,7 +11,7 @@ from telebot import types
 API_TOKEN = os.getenv('API_TOKEN', '8501387772:AAH8dn31CMywDrF0nSjM7TMfB2uA8i-Nfzg')
 MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://drama:drama@cluster0.sa4kvgu.mongodb.net/DramaStoreDB?retryWrites=true&w=majority&appName=Cluster0')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '8932594210'))
-WEB_URL = os.getenv('WEB_URL', 'https://official-elene-akashvaikh-d4e6b245.koyeb.app') # আপনার অ্যাপ URL
+WEB_URL = os.getenv('WEB_URL', 'https://official-elene-akashvaikh-d4e6b245.koyeb.app') 
 
 # শর্ট লিঙ্ক সেটিংস
 SHORTENER_URL = "https://urlbotsot.vercel.app/api"
@@ -54,7 +54,7 @@ def is_subscribed(user_id):
             if status in ['left', 'kicked']:
                 return False
         except Exception:
-            continue # চ্যানেল থেকে বট রিমুভ থাকলে স্কিপ করবে
+            continue 
     return True
 
 # --- বাটন জেনারেটর ---
@@ -75,8 +75,7 @@ def get_channel_buttons(extra_buttons=None):
         for b in extra_buttons:
             markup.add(b)
             
-    # এডমিন কন্টাক্ট বাটন যোগ করা হয়েছে
-    admin_btn = types.InlineKeyboardButton("👨‍💻 Admin Contact", url="https://t.me/AllDramaKingsAdminBot") # এখানে আপনার ইউজারনেম দিতে পারেন
+    admin_btn = types.InlineKeyboardButton("👨‍💻 Admin Contact", url="https://t.me/AllDramaKingsAdminBot")
     markup.add(admin_btn)
     
     return markup
@@ -104,7 +103,6 @@ def start(message):
     settings = get_settings()
     args = message.text.split()
     
-    # যদি স্টার্ট লিঙ্কে ফাইল কি (Key) থাকে
     if len(args) > 1:
         key = args[1]
         
@@ -126,24 +124,38 @@ def start(message):
                 markup = get_channel_buttons([u_btn])
                 
                 try:
-                    # ফাইল চ্যানেলে পাঠানো
-                    bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'], reply_markup=markup)
+                    # ফাইল চ্যানেলে পাঠানো এবং মেসেজ আইডি নেওয়া
+                    sent_to_channel = bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'], reply_markup=markup)
                     
-                    # ইউজার চ্যানেলের লিঙ্ক বের করা
+                    # ইউজার চ্যানেলের লিঙ্ক এবং পোস্ট লিঙ্ক বের করা
                     try:
                         chat_info = bot.get_chat(settings['send_channel'])
-                        channel_link = f"https://t.me/{chat_info.username}" if chat_info.username else "Private Channel"
+                        if chat_info.username:
+                            channel_link = f"https://t.me/{chat_info.username}"
+                            post_link = f"https://t.me/{chat_info.username}/{sent_to_channel.message_id}"
+                        else:
+                            channel_link = "Private Channel"
+                            # প্রাইভেট চ্যানেলের লিঙ্ক ফরম্যাট (যদি ইউজার জয়েন থাকে)
+                            clean_id = str(settings['send_channel']).replace("-100", "")
+                            post_link = f"https://t.me/c/{clean_id}/{sent_to_channel.message_id}"
                     except:
                         channel_link = "Channel"
+                        post_link = "N/A"
 
-                    # ইউজারকে ফাইল ও চ্যানেলের তথ্য দেওয়া
+                    # ইউজারকে চ্যানেলের তথ্য ও সরাসরি ফাইলের লিঙ্ক দেওয়া
                     response_text = (
-                        "✅ ফাইলটি আমাদের ইউজার চ্যানেলে পাঠানো হয়েছে।\n\n"
+                        "✅ **ফাইলটি আমাদের ইউজার চ্যানেলে পাঠানো হয়েছে!**\n\n"
                         f"📢 **চ্যানেল লিঙ্ক:** {channel_link}\n"
-                        f"🔗 **বট ডিরেক্ট লিঙ্ক:** `{bot_link_raw}`\n\n"
-                        "দয়া করে চেক করুন।"
+                        f"🚀 **ফাইলের সরাসরি লিঙ্ক:** [এখানে ক্লিক করুন]({post_link})\n\n"
+                        "👆 ওপরের লিঙ্কে ক্লিক করলে সরাসরি ফাইলে নিয়ে যাবে।"
                     )
-                    bot.send_message(message.chat.id, response_text, parse_mode="Markdown", disable_web_page_preview=True)
+                    
+                    # বাটন আকারেও দেওয়া হলো সুবিধার জন্য
+                    action_btns = types.InlineKeyboardMarkup()
+                    action_btns.add(types.InlineKeyboardButton("📂 View File in Channel", url=post_link))
+                    
+                    bot.send_message(message.chat.id, response_text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=action_btns)
+                    
                 except Exception as e:
                     bot.send_message(message.chat.id, f"❌ ভুল: {str(e)}")
             else:
@@ -185,7 +197,6 @@ def status(message):
     f_count = links_col.count_documents({})
     bot.reply_to(message, f"📊 **বট স্ট্যাটাস**\n\n👥 মোট ইউজার: {u_count}\n📁 মোট ফাইল: {f_count}", parse_mode="Markdown")
 
-# নতুন কমান্ড: ডাটাবেস থেকে সব ফাইল ডিলিট করা
 @bot.message_handler(commands=['del_all_files'])
 def delete_files(message):
     if message.from_user.id != ADMIN_ID: return
@@ -234,7 +245,7 @@ def set_force(message):
     except Exception as e:
         bot.reply_to(message, f"ভুল হয়েছে। উদাহরণ: `/set_force -1001, -1002` \nError: {e}")
 
-# --- ফাইল হ্যান্ডলিং (সব ফাইল সাপোর্ট) ---
+# --- ফাইল হ্যান্ডলিং ---
 
 @bot.message_handler(content_types=['document', 'video', 'audio', 'photo', 'voice', 'animation'])
 def handle_files(message):
@@ -258,7 +269,6 @@ def handle_files(message):
             "log_channel": settings['log_channel']
         })
         
-        # সর্ট লিঙ্ক এবং ডিরেক্ট লিঙ্ক দুটোই দেওয়া হয়েছে
         bot.reply_to(message, 
             f"✅ **ফাইল সেভ হয়েছে!**\n\n🔗 সর্ট লিঙ্ক: `{short_link}`\n🔗 ডিরেক্ট লিঙ্ক: `{raw_link}`", 
             parse_mode="Markdown", 
@@ -267,7 +277,7 @@ def handle_files(message):
     except Exception as e:
         bot.reply_to(message, f"❌ এরর: {str(e)}")
 
-# --- সার্ভার (Vercel/Render/Koyeb) ---
+# --- সার্ভার সেটআপ ---
 
 @app.route('/' + API_TOKEN, methods=['POST'])
 def getMessage():

@@ -35,7 +35,8 @@ def get_settings():
             "log_channel": None, 
             "send_channel": None, 
             "force_channels": [],
-            "logo_url": "https://telegra.ph/file/default-logo.jpg"
+            "logo_url": "https://telegra.ph/file/default-logo.jpg",
+            "fsub_active": True  # ডিফল্টভাবে ফোর্স সাবস্ক্রাইব চালু
         }
         settings_col.insert_one(default)
         return default
@@ -45,7 +46,13 @@ def get_settings():
 def is_subscribed(user_id):
     if user_id == ADMIN_ID:
         return True
+    
     settings = get_settings()
+    
+    # এডমিন যদি ফোর্স সাবস্ক্রাইব বন্ধ করে রাখে তবে চেক করবে না
+    if not settings.get('fsub_active', True):
+        return True
+
     channels = settings.get('force_channels', [])
     if not channels:
         return True
@@ -127,35 +134,42 @@ def start(message):
             if settings.get('send_channel'):
                 try:
                     # ফাইল চ্যানেলে পাঠানো এবং মেসেজ আইডি নেওয়া
-                    # এখানে bot.copy_message ব্যবহার করা হয়েছে যাতে ফাইলটি ইউজার চ্যানেলে যায়
                     sent_to_channel = bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'])
                     
                     # চ্যানেলের লিঙ্ক ও পোস্ট লিঙ্ক তৈরি
                     chat_info = bot.get_chat(settings['send_channel'])
+                    
+                    # চ্যানেল মেইন লিঙ্ক তৈরি
                     if chat_info.username:
+                        main_channel_link = f"https://t.me/{chat_info.username}"
                         post_link = f"https://t.me/{chat_info.username}/{sent_to_channel.message_id}"
-                        channel_link = f"@{chat_info.username}"
+                        channel_display = f"@{chat_info.username}"
                     else:
+                        # প্রাইভেট চ্যানেলের জন্য ইনভাইট লিঙ্ক ব্যবহার
+                        main_channel_link = bot.export_chat_invite_link(settings['send_channel'])
                         clean_id = str(settings['send_channel']).replace("-100", "")
                         post_link = f"https://t.me/c/{clean_id}/{sent_to_channel.message_id}"
-                        channel_link = "Private Channel"
+                        channel_display = "আমাদের চ্যানেল"
 
                     response_text = (
-                        "✅ **ফাইলটি আমাদের চ্যানেলে পাঠানো হয়েছে!**\n\n"
-                        f"📢 **চ্যানেল:** {channel_link}\n"
-                        f"🚀 **ফাইলের সরাসরি লিঙ্ক:** [এখানে ক্লিক করুন]({post_link})\n\n"
+                        "✅ **ফাইলটি সফলভাবে চ্যানেলে পাঠানো হয়েছে!**\n\n"
+                        f"📢 **চ্যানেল লিঙ্ক:** [এখানে ক্লিক করুন]({main_channel_link})\n"
+                        f"🚀 **ফাইলের পোস্ট লিঙ্ক:** [এখানে ক্লিক করুন]({post_link})\n\n"
                         "👆 ওপরের লিঙ্কে ক্লিক করলে সরাসরি ফাইলে নিয়ে যাবে।"
                     )
                     
-                    action_btns = types.InlineKeyboardMarkup()
-                    action_btns.add(types.InlineKeyboardButton("📂 View File in Channel", url=post_link))
+                    action_btns = types.InlineKeyboardMarkup(row_width=1)
+                    action_btns.add(
+                        types.InlineKeyboardButton("📢 Join Main Channel", url=main_channel_link),
+                        types.InlineKeyboardButton("📂 View File Post", url=post_link)
+                    )
                     
                     bot.send_message(message.chat.id, response_text, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=action_btns)
                     
                 except Exception as e:
                     bot.send_message(message.chat.id, f"❌ ভুল: {str(e)}")
             else:
-                # যদি send_channel সেট না থাকে তবে সরাসরি ইউজারকে ফাইল পাঠানো (বিকল্প ব্যবস্থা)
+                # যদি send_channel সেট না থাকে তবে সরাসরি ইউজারকে ফাইল পাঠানো
                 try:
                     bot.copy_message(message.chat.id, data['log_channel'], data['msg_id'])
                 except:
@@ -179,6 +193,18 @@ def start(message):
 
 # --- এডমিন কমান্ডস ---
 
+@bot.message_handler(commands=['fsub_on'])
+def fsub_on(message):
+    if message.from_user.id != ADMIN_ID: return
+    settings_col.update_one({"id": "bot_settings"}, {"$set": {"fsub_active": True}}, upsert=True)
+    bot.reply_to(message, "✅ **ফোর্স সাবস্ক্রাইব (Must Join) অন করা হয়েছে।**")
+
+@bot.message_handler(commands=['fsub_off'])
+def fsub_off(message):
+    if message.from_user.id != ADMIN_ID: return
+    settings_col.update_one({"id": "bot_settings"}, {"$set": {"fsub_active": False}}, upsert=True)
+    bot.reply_to(message, "⚠️ **ফোর্স সাবস্ক্রাইব (Must Join) অফ করা হয়েছে। এখন যে কেউ জয়েন না করেই ফাইল পাবে।**")
+
 @bot.message_handler(commands=['set_logo'])
 def set_logo(message):
     if message.from_user.id != ADMIN_ID: return
@@ -194,7 +220,9 @@ def status(message):
     if message.from_user.id != ADMIN_ID: return
     u_count = users_col.count_documents({})
     f_count = links_col.count_documents({})
-    bot.reply_to(message, f"📊 **বট স্ট্যাটাস**\n\n👥 মোট ইউজার: {u_count}\n📁 মোট ফাইল: {f_count}", parse_mode="Markdown")
+    settings = get_settings()
+    fsub_status = "✅ চালু" if settings.get('fsub_active', True) else "❌ বন্ধ"
+    bot.reply_to(message, f"📊 **বট স্ট্যাটাস**\n\n👥 মোট ইউজার: {u_count}\n📁 মোট ফাইল: {f_count}\n📢 ফোর্স সাবস্ক্রাইব: {fsub_status}", parse_mode="Markdown")
 
 @bot.message_handler(commands=['broadcast'])
 def broadcast(message):
@@ -238,7 +266,7 @@ def set_force(message):
     except:
         bot.reply_to(message, "ভুল ফরম্যাট। উদাহরণ: `/set_force -1001, -1002`")
 
-# --- ফাইল হ্যান্ডলিং (শুধুমাত্র এডমিন ফাইল সেভ করতে পারবে) ---
+# --- ফাইল হ্যান্ডলিং ---
 
 @bot.message_handler(content_types=['document', 'video', 'audio', 'photo', 'voice', 'animation'])
 def handle_files(message):

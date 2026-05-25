@@ -2,26 +2,24 @@ import os
 import telebot
 import uuid
 import requests
-import threading
 import time
 from flask import Flask, request
 from pymongo import MongoClient
 from telebot import types
 
-# --- কনফিগারেশন ---
-API_ID = 29904834
-API_HASH = '8b4fd9ef578af114502feeafa2d31938'
-API_TOKEN = '8501387772:AAH8dn31CMywDrF0nSjM7TMfB2uA8i-Nfzg'
-MONGO_URI = 'mongodb+srv://drama:drama@cluster0.sa4kvgu.mongodb.net/DramaStoreDB?retryWrites=true&w=majority&appName=Cluster0'
-ADMIN_ID = 8932594210
-WEB_URL = "https://filestore-jet.vercel.app" # আপনার Vercel/Render URL
+# --- কনফিগারেশন (Environment Variables) ---
+# এগুলো আপনি আপনার ড্যাশবোর্ড (Vercel/Render) থেকে সেট করবেন
+API_TOKEN = os.getenv('API_TOKEN', '8501387772:AAH8dn31CMywDrF0nSjM7TMfB2uA8i-Nfzg')
+MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://drama:drama@cluster0.sa4kvgu.mongodb.net/DramaStoreDB?retryWrites=true&w=majority&appName=Cluster0')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '8932594210'))
+WEB_URL = os.getenv('WEB_URL', 'https://filestore-jet.vercel.app') # আপনার অ্যাপ URL
 
 # শর্ট লিঙ্ক সেটিংস
 SHORTENER_URL = "https://urlbotsot.vercel.app/api"
 SHORTENER_API = "akashdeveloper"
 
 # বট ও ডাটাবেস ইনিশিয়ালাইজ
-bot = telebot.TeleBot(API_TOKEN, threaded=True)
+bot = telebot.TeleBot(API_TOKEN, threaded=False)
 app = Flask(__name__)
 client = MongoClient(MONGO_URI)
 db = client['DramaStoreDB']
@@ -29,7 +27,7 @@ links_col = db['links']
 settings_col = db['settings']
 users_col = db['users']
 
-# ডিফল্ট সেটিংস লোড
+# --- ডাটাবেস ফাংশন ---
 def get_settings():
     settings = settings_col.find_one({"id": "bot_settings"})
     if not settings:
@@ -44,22 +42,35 @@ def get_settings():
         return default
     return settings
 
+# --- ফোর্স সাবস্ক্রাইব চেক ---
+def is_subscribed(user_id):
+    settings = get_settings()
+    channels = settings.get('force_channels', [])
+    if not channels:
+        return True
+    
+    for cid in channels:
+        try:
+            status = bot.get_chat_member(cid, user_id).status
+            if status in ['left', 'kicked']:
+                return False
+        except Exception:
+            continue # চ্যানেল থেকে বট রিমুভ থাকলে স্কিপ করবে
+    return True
+
 # --- বাটন জেনারেটর ---
 def get_channel_buttons(extra_buttons=None):
     settings = get_settings()
     channels = settings.get('force_channels', [])
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup = types.InlineKeyboardMarkup(row_width=1)
     
-    btns = []
     for i, cid in enumerate(channels, 1):
         try:
             chat = bot.get_chat(cid)
             link = f"https://t.me/{chat.username}" if chat.username else bot.export_chat_invite_link(cid)
-            btns.append(types.InlineKeyboardButton(f"Join Channel {i} 📢", url=link))
-        except: continue
-    
-    if btns:
-        markup.add(*btns)
+            markup.add(types.InlineKeyboardButton(f"Join Channel {i} 📢", url=link))
+        except:
+            continue
     
     if extra_buttons:
         for b in extra_buttons:
@@ -77,13 +88,14 @@ def get_short_link(long_url):
     except:
         return long_url
 
-# --- কমান্ড হ্যান্ডলার ---
+# --- সাধারণ কমান্ড হ্যান্ডলার ---
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    # নতুন ইউজার সেভ (ব্রডকাস্টের জন্য)
-    if not users_col.find_one({"user_id": message.from_user.id}):
-        users_col.insert_one({"user_id": message.from_user.id})
+    user_id = message.from_user.id
+    # ইউজার সেভ
+    if not users_col.find_one({"user_id": user_id}):
+        users_col.insert_one({"user_id": user_id})
 
     settings = get_settings()
     args = message.text.split()
@@ -91,19 +103,27 @@ def start(message):
     # যদি স্টার্ট লিঙ্কে ফাইল কি (Key) থাকে
     if len(args) > 1:
         key = args[1]
-        data = links_col.find_one({"key": key})
         
+        # ফোর্স সাবস্ক্রাইব চেক
+        if not is_subscribed(user_id):
+            btn = types.InlineKeyboardButton("Try Again 🔄", url=f"https://t.me/{bot.get_me().username}?start={key}")
+            return bot.send_message(
+                message.chat.id, 
+                "❌ **ফাইলটি পেতে আপনাকে আমাদের নিচের চ্যানেলে জয়েন করতে হবে।**", 
+                reply_markup=get_channel_buttons([btn]),
+                parse_mode="Markdown"
+            )
+
+        data = links_col.find_one({"key": key})
         if data:
             if settings.get('send_channel'):
-                # ইউজার চ্যানেলে ফাইল কপি করে পাঠানো
                 bot_link = f"https://t.me/{bot.get_me().username}?start={key}"
-                # ইউজার চ্যানেলের বাটন
                 u_btn = types.InlineKeyboardButton("🤖 Bot Link", url=get_short_link(bot_link))
                 markup = get_channel_buttons([u_btn])
                 
                 try:
                     bot.copy_message(settings['send_channel'], data['log_channel'], data['msg_id'], reply_markup=markup)
-                    bot.send_message(message.chat.id, "✅ ফাইলটি ইউজার চ্যানেলে পাঠানো হয়েছে। দয়া করে চেক করুন।", reply_markup=get_channel_buttons())
+                    bot.send_message(message.chat.id, "✅ ফাইলটি আমাদের ইউজার চ্যানেলে পাঠানো হয়েছে। দয়া করে চেক করুন।")
                 except Exception as e:
                     bot.send_message(message.chat.id, f"❌ ভুল: {str(e)}")
             else:
@@ -117,7 +137,6 @@ def start(message):
     start_text = (
         f"👋 হ্যালো, **{user.first_name}**\n\n"
         f"🆔 ইউজার আইডি: `{user.id}`\n"
-        f"👤 ইউজার নাম: {user.first_name} {user.last_name or ''}\n"
         f"👤 ইউজারনেম: @{user.username or 'N/A'}\n\n"
         "ফাইল পেতে নিচের বাটন থেকে চ্যানেলে জয়েন করুন।"
     )
@@ -158,7 +177,7 @@ def broadcast(message):
         try:
             bot.copy_message(u['user_id'], message.chat.id, message.reply_to_message.message_id)
             success += 1
-            time.sleep(0.2)
+            time.sleep(0.05)
         except: continue
     bot.send_message(message.chat.id, f"✅ ব্রডকাস্ট শেষ! {success} জন ইউজারকে পাঠানো হয়েছে।")
 
@@ -169,7 +188,7 @@ def set_channels(message):
     try:
         cid = int(message.text.split()[1])
         settings_col.update_one({"id": "bot_settings"}, {"$set": {key: cid}}, upsert=True)
-        bot.reply_to(message, f"✅ {key} আপডেট হয়েছে: `{cid}`", parse_mode="Markdown")
+        bot.reply_to(message, f"✅ {key} আপডেট হয়েছে: `{cid}`")
     except:
         bot.reply_to(message, "সঠিক আইডি দিন। উদাহরণ: `/log_cnl -100xxxxxxx`")
 
@@ -177,11 +196,16 @@ def set_channels(message):
 def set_force(message):
     if message.from_user.id != ADMIN_ID: return
     try:
-        ids = [int(i.strip()) for i in message.text.replace('/set_force','').split(',')]
+        ids_text = message.text.replace('/set_force', '').strip()
+        if not ids_text:
+            settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": []}})
+            return bot.reply_to(message, "✅ ফোর্স সাবস্ক্রাইব রিমুভ করা হয়েছে।")
+        
+        ids = [int(i.strip()) for i in ids_text.split(',') if i.strip()]
         settings_col.update_one({"id": "bot_settings"}, {"$set": {"force_channels": ids}}, upsert=True)
-        bot.reply_to(message, "✅ ফোর্স সাবস্ক্রাইব চ্যানেল আপডেট হয়েছে।")
-    except:
-        bot.reply_to(message, "কমা দিয়ে আইডি দিন। উদাহরণ: `/set_force -1001, -1002`")
+        bot.reply_to(message, f"✅ ফোর্স সাবস্ক্রাইব চ্যানেল আপডেট হয়েছে। (মোট: {len(ids)})")
+    except Exception as e:
+        bot.reply_to(message, f"ভুল হয়েছে। উদাহরণ: `/set_force -1001, -1002` \nError: {e}")
 
 # --- ফাইল হ্যান্ডলিং (সব ফাইল সাপোর্ট) ---
 
@@ -192,59 +216,44 @@ def handle_files(message):
     if not settings.get('log_channel'):
         return bot.reply_to(message, "❌ আগে `/log_cnl` দিয়ে লগ চ্যানেল সেট করুন।")
 
-    # ফাইল টাইপ এবং আইডি বের করা
-    file_id = ""
-    if message.photo: file_id = message.photo[-1].file_id
-    elif message.video: file_id = message.video.file_id
-    elif message.document: file_id = message.document.file_id
-    elif message.audio: file_id = message.audio.file_id
-    elif message.voice: file_id = message.voice.file_id
-    elif message.animation: file_id = message.animation.file_id
-
     key = str(uuid.uuid4())[:8]
     raw_link = f"https://t.me/{bot.get_me().username}?start={key}"
     short_link = get_short_link(raw_link)
 
-    # বাটন তৈরি
     btn = types.InlineKeyboardButton("🤖 Bot Link", url=short_link)
     markup = get_channel_buttons([btn])
 
-    # লগ চ্যানেলে পাঠানো
     try:
-        sent_log = bot.copy_message(settings['log_channel'], message.chat.id, message.message_id, reply_markup=markup)
-        
-        # ডাটাবেসে সেভ
+        sent_log = bot.copy_message(settings['log_channel'], message.chat.id, message.message_id)
         links_col.insert_one({
             "key": key,
             "msg_id": sent_log.message_id,
-            "log_channel": settings['log_channel'],
-            "file_id": file_id
+            "log_channel": settings['log_channel']
         })
-
         bot.reply_to(message, f"✅ **ফাইল সেভ হয়েছে!**\n\n🔗 সর্ট লিঙ্ক: `{short_link}`", parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
         bot.reply_to(message, f"❌ এরর: {str(e)}")
 
-# --- সার্ভার সেটআপ ---
+# --- সার্ভার (Vercel/Render/Koyeb) ---
 
 @app.route('/' + API_TOKEN, methods=['POST'])
 def getMessage():
-    bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
     return "!", 200
 
 @app.route("/")
 def index():
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{WEB_URL}/{API_TOKEN}")
-    return "Bot is Running Live!", 200
+    return "Bot is Running!", 200
+
+@app.route("/set_webhook")
+def set_webhook():
+    s = bot.set_webhook(url=f"{WEB_URL}/{API_TOKEN}")
+    if s:
+        return "Webhook setup success!", 200
+    else:
+        return "Webhook setup failed.", 200
 
 if __name__ == "__main__":
-    # বট সচল রাখতে আলাদা থ্রেড
-    def run_bot():
-        while True:
-            try:
-                app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
-            except:
-                time.sleep(5)
-    
-    threading.Thread(target=run_bot).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
